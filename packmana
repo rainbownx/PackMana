@@ -1,0 +1,310 @@
+#!/bin/bash
+
+REPO_DIR="./packages"
+CACHE_DIR="./cache"
+REPO_LIST="./repos.list"
+CONFIG="./.packmana_config"
+INSTALL_DIR="./installed"
+
+mkdir -p "$REPO_DIR" "$CACHE_DIR" "$INSTALL_DIR"
+touch "$REPO_LIST"
+
+first_run_setup() {
+    echo "Welcome to Packmana!"
+    echo "It looks like this is your first time running Packmana."
+
+    echo ""
+    echo "Please select which package repositories you'd like to add:"
+    echo "1) Packmana Official Repo"
+    echo "   https://rainbownx.github.io/PackMana-Respository"
+    echo "2) Arch Linux Official Repo"
+    echo "   https://gitlab.archlinux.org/archlinux"
+    echo "3) Arch User Repository (AUR) (Unofficial)"
+    echo "   https://aur.archlinux.org"
+    echo "4) None / Add your own repo URL"
+
+    read -rp "Enter numbers separated by commas (e.g. 1,3): " choices
+
+    add_repo_safe() {
+        local url="$1"
+        if grep -Fxq "$url" "$REPO_LIST" 2>/dev/null; then
+            echo "Repo already added: $url"
+        else
+            echo "$url" >> "$REPO_LIST"
+            echo "Added repo: $url"
+        fi
+    }
+
+    IFS=',' read -ra sel <<< "$choices"
+    for choice in "${sel[@]}"; do
+        case "$choice" in
+            1)
+                add_repo_safe "https://rainbownx.github.io/PackMana-Respository"
+                ;;
+            2)
+                add_repo_safe "https://gitlab.archlinux.org/archlinux"
+                ;;
+            3)
+                add_repo_safe "https://aur.archlinux.org"
+                ;;
+            4)
+                echo "You chose to add your own repo URL."
+                ;;
+            *)
+                echo "Ignoring invalid choice: $choice"
+                ;;
+        esac
+    done
+
+    read -rp "Do you want to add a custom repository URL? (y/N): " addcustom
+    if [[ "$addcustom" =~ ^[Yy]$ ]]; then
+        while true; do
+            read -rp "Enter the full URL of your custom repo (or leave empty to finish): " customurl
+            if [[ -z "$customurl" ]]; then
+                break
+            fi
+            add_repo_safe "$customurl"
+        done
+    fi
+
+    touch "$CONFIG"
+    echo "Setup complete! You can add more repos anytime with 'packmana add-repo <url>'."
+    echo ""
+}
+
+install_pkg() {
+    pkgname="$1"
+    pkgname="${pkgname%.tar.gz}"
+
+    cachefile="$CACHE_DIR/$pkgname.tar.gz"
+
+    localfile="$REPO_DIR/$pkgname.tar.gz"
+    if [ -f "$localfile" ]; then
+        echo "Installing $pkgname from local repository..."
+        cp "$localfile" "$cachefile"
+    else
+        echo "Searching remote repositories for $pkgname..."
+        found=0
+        while read -r url; do
+            baseurl="${url%/}"
+            pkgurl="$baseurl/$pkgname.tar.gz"
+            echo "Trying $pkgurl"
+            if curl --fail --location --progress-bar -o "$cachefile" "$pkgurl"; then
+                found=1
+                break
+            fi
+        done < "$REPO_LIST"
+
+        if [ "$found" -ne 1 ]; then
+            echo "Package $pkgname not found in any repository."
+            exit 1
+        fi
+    fi
+
+    echo "Extracting package..."
+    tempdir=$(mktemp -d)
+    tar -xzf "$cachefile" -C "$tempdir"
+
+    scriptfile=$(find "$tempdir" -type f -name "*.sh" | head -n1)
+    if [ -z "$scriptfile" ]; then
+        echo "Error: No .sh script file found inside the package."
+        rm -rf "$tempdir"
+        exit 1
+    fi
+
+    echo "Installing script $scriptfile to /usr/bin/$pkgname"
+
+    sudo mv "$scriptfile" "/usr/bin/$pkgname"
+    sudo chmod +x "/usr/bin/$pkgname"
+
+    # Check for version file on repo
+    version="unknown"
+    # Try get version from remote repo
+    while read -r url; do
+        baseurl="${url%/}"
+        version_url="$baseurl/$pkgname.version"
+        remote_version=$(curl -fsSL "$version_url" 2>/dev/null)
+        if [ -n "$remote_version" ]; then
+            version="$remote_version"
+            break
+        fi
+    done < "$REPO_LIST"
+
+    # Save install info: first line = path, second line = version
+    echo "/usr/bin/$pkgname" > "$INSTALL_DIR/$pkgname.pkginfo"
+    echo "$version" >> "$INSTALL_DIR/$pkgname.pkginfo"
+
+    rm -rf "$tempdir"
+
+    echo "Installed $pkgname successfully (version: $version)."
+}
+
+remove_pkg() {
+    pkgname="$1"
+    pkginfo="$INSTALL_DIR/$pkgname.pkginfo"
+
+    if [ ! -f "$pkginfo" ]; then
+        echo "Package not installed: $pkgname"
+        exit 1
+    fi
+
+    echo "Removing $pkgname..."
+
+    while read -r file; do
+        # Skip empty lines and lines that look like version numbers
+        if [[ "$file" =~ ^/ ]]; then
+            sudo rm -f "$file"
+            echo "Deleted $file"
+        fi
+    done < "$pkginfo"
+
+    rm -f "$pkginfo"
+    echo "Removed $pkgname."
+}
+
+list_pkgs() {
+    echo "Installed packages:"
+    for f in "$INSTALL_DIR"/*.pkginfo; do
+        [ -e "$f" ] && basename "$f" .pkginfo
+    done
+}
+
+search_pkgs() {
+    echo "Available local packages:"
+    for f in "$REPO_DIR"/*.tar.gz; do
+        [ -e "$f" ] && basename "$f" .tar.gz
+    done
+
+    echo ""
+    echo "Configured remote repositories:"
+    cat "$REPO_LIST"
+}
+
+add_repo() {
+    url="$1"
+    if grep -Fxq "$url" "$REPO_LIST" 2>/dev/null; then
+        echo "Repository already exists."
+    else
+        echo "$url" >> "$REPO_LIST"
+        echo "Repository added: $url"
+    fi
+}
+
+list_repos() {
+    echo "Configured repositories:"
+    cat "$REPO_LIST"
+}
+
+repo_add() {
+    echo "Enter path to your local bash script (.sh or plain bash file):"
+    read -r scriptpath
+
+    if [ ! -f "$scriptpath" ]; then
+        echo "File does not exist."
+        exit 1
+    fi
+
+    filename=$(basename -- "$scriptpath")
+    pkgname="${filename%.*}"
+    echo "Packaging $filename as $pkgname.tar.gz"
+
+    tempdir=$(mktemp -d)
+    cp "$scriptpath" "$tempdir/$filename"
+
+    tar -czf "$REPO_DIR/$pkgname.tar.gz" -C "$tempdir" "$filename"
+    rm -rf "$tempdir"
+
+    echo "Package created at $REPO_DIR/$pkgname.tar.gz"
+    echo ""
+    echo "To add this package to your GitHub repo:"
+    echo "1) Copy the package to your local GitHub Pages repo directory."
+    echo "2) Commit and push the changes:"
+    echo "   git add $pkgname.tar.gz"
+    echo "   git commit -m 'Add package $pkgname'"
+    echo "   git push"
+    echo ""
+    echo "You can also create a $pkgname.version file with the version string and add it similarly."
+}
+
+update_pkgs() {
+    echo "Checking for package updates..."
+    for pkginfo in "$INSTALL_DIR"/*.pkginfo; do
+        pkgname=$(basename "$pkginfo" .pkginfo)
+        installed_version=$(sed -n '2p' "$pkginfo")
+
+        echo "Checking updates for $pkgname..."
+
+        updated=0
+        while read -r repo; do
+            baseurl="${repo%/}"
+            version_url="$baseurl/$pkgname.version"
+            new_version=$(curl -fsSL "$version_url" 2>/dev/null)
+
+            if [ -n "$new_version" ]; then
+                if [[ "$new_version" != "$installed_version" ]]; then
+                    echo "Update found for $pkgname: $installed_version -> $new_version"
+                    # Call this script recursively to remove and install updated package
+                    "$0" remove "$pkgname"
+                    "$0" install "$pkgname"
+                    updated=1
+                    break
+                fi
+            fi
+        done < "$REPO_LIST"
+
+        if [ "$updated" -eq 0 ]; then
+            echo "$pkgname is up to date."
+        fi
+    done
+}
+
+usage() {
+    echo "Usage: $0 {install|remove|list|search|add-repo|list-repos|repo-add|update} [package|url]"
+}
+
+if [ ! -f "$CONFIG" ]; then
+    first_run_setup
+fi
+
+case "$1" in
+    install)
+        if [ -z "$2" ]; then
+            echo "Error: Please specify a package to install."
+            exit 1
+        fi
+        install_pkg "$2"
+        ;;
+    remove)
+        if [ -z "$2" ]; then
+            echo "Error: Please specify a package to remove."
+            exit 1
+        fi
+        remove_pkg "$2"
+        ;;
+    list)
+        list_pkgs
+        ;;
+    search)
+        search_pkgs
+        ;;
+    add-repo)
+        if [ -z "$2" ]; then
+            echo "Error: Please specify a repository URL to add."
+            exit 1
+        fi
+        add_repo "$2"
+        ;;
+    list-repos)
+        list_repos
+        ;;
+    repo-add)
+        repo_add
+        ;;
+    update)
+        update_pkgs
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
