@@ -1,18 +1,21 @@
 #!/bin/bash
 
-REPO_DIR="./packages"
-CACHE_DIR="./cache"
-REPO_LIST="./repos.list"
-CONFIG="./.packmana_config"
-INSTALL_DIR="./installed"
+# Base directories (change if needed)
+BASE_DIR="$HOME/.packmana"
+REPO_DIR="$BASE_DIR/packages"
+CACHE_DIR="$BASE_DIR/cache"
+REPO_LIST="$BASE_DIR/repos.list"
+CONFIG="$BASE_DIR/.config"
+INSTALL_DIR="$BASE_DIR/installed"
 
-mkdir -p "$REPO_DIR" "$CACHE_DIR" "$INSTALL_DIR"
+# Create needed directories and files
+mkdir -p "$REPO_DIR" "$CACHE_DIR" "$INSTALL_DIR" "$(dirname "$REPO_LIST")"
 touch "$REPO_LIST"
+touch "$CONFIG"
 
 first_run_setup() {
     echo "Welcome to Packmana!"
     echo "It looks like this is your first time running Packmana."
-
     echo ""
     echo "Please select which package repositories you'd like to add:"
     echo "1) Packmana Official Repo"
@@ -22,7 +25,6 @@ first_run_setup() {
     echo "3) Arch User Repository (AUR) (Unofficial)"
     echo "   https://aur.archlinux.org"
     echo "4) None / Add your own repo URL"
-
     read -rp "Enter numbers separated by commas (e.g. 1,3): " choices
 
     add_repo_safe() {
@@ -38,21 +40,11 @@ first_run_setup() {
     IFS=',' read -ra sel <<< "$choices"
     for choice in "${sel[@]}"; do
         case "$choice" in
-            1)
-                add_repo_safe "https://rainbownx.github.io/PackMana-Respository"
-                ;;
-            2)
-                add_repo_safe "https://gitlab.archlinux.org/archlinux"
-                ;;
-            3)
-                add_repo_safe "https://aur.archlinux.org"
-                ;;
-            4)
-                echo "You chose to add your own repo URL."
-                ;;
-            *)
-                echo "Ignoring invalid choice: $choice"
-                ;;
+            1) add_repo_safe "https://rainbownx.github.io/PackMana-Respository" ;;
+            2) add_repo_safe "https://gitlab.archlinux.org/archlinux" ;;
+            3) add_repo_safe "https://aur.archlinux.org" ;;
+            4) echo "You chose to add your own repo URL." ;;
+            *) echo "Ignoring invalid choice: $choice" ;;
         esac
     done
 
@@ -60,31 +52,27 @@ first_run_setup() {
     if [[ "$addcustom" =~ ^[Yy]$ ]]; then
         while true; do
             read -rp "Enter the full URL of your custom repo (or leave empty to finish): " customurl
-            if [[ -z "$customurl" ]]; then
-                break
-            fi
+            [[ -z "$customurl" ]] && break
             add_repo_safe "$customurl"
         done
     fi
 
-    touch "$CONFIG"
     echo "Setup complete! You can add more repos anytime with 'packmana add-repo <url>'."
     echo ""
+    touch "$CONFIG"
 }
 
 install_pkg() {
-    pkgname="$1"
-    pkgname="${pkgname%.tar.gz}"
+    local pkgname="${1%.tar.gz}"
+    local cachefile="$CACHE_DIR/$pkgname.tar.gz"
+    local localfile="$REPO_DIR/$pkgname.tar.gz"
 
-    cachefile="$CACHE_DIR/$pkgname.tar.gz"
-
-    localfile="$REPO_DIR/$pkgname.tar.gz"
     if [ -f "$localfile" ]; then
         echo "Installing $pkgname from local repository..."
         cp "$localfile" "$cachefile"
     else
         echo "Searching remote repositories for $pkgname..."
-        found=0
+        local found=0
         while read -r url; do
             baseurl="${url%/}"
             pkgurl="$baseurl/$pkgname.tar.gz"
@@ -102,9 +90,11 @@ install_pkg() {
     fi
 
     echo "Extracting package..."
+    local tempdir
     tempdir=$(mktemp -d)
     tar -xzf "$cachefile" -C "$tempdir"
 
+    local scriptfile
     scriptfile=$(find "$tempdir" -type f -name "*.sh" | head -n1)
     if [ -z "$scriptfile" ]; then
         echo "Error: No .sh script file found inside the package."
@@ -113,13 +103,11 @@ install_pkg() {
     fi
 
     echo "Installing script $scriptfile to /usr/bin/$pkgname"
-
-    sudo mv "$scriptfile" "/usr/bin/$pkgname"
+    sudo mv "$scriptfile" "/usr/bin/$pkgname" || { echo "Failed to move script. Check permissions."; exit 1; }
     sudo chmod +x "/usr/bin/$pkgname"
 
-    # Check for version file on repo
-    version="unknown"
-    # Try get version from remote repo
+    # Get version info from repo or unknown
+    local version="unknown"
     while read -r url; do
         baseurl="${url%/}"
         version_url="$baseurl/$pkgname.version"
@@ -131,8 +119,10 @@ install_pkg() {
     done < "$REPO_LIST"
 
     # Save install info: first line = path, second line = version
-    echo "/usr/bin/$pkgname" > "$INSTALL_DIR/$pkgname.pkginfo"
-    echo "$version" >> "$INSTALL_DIR/$pkgname.pkginfo"
+    {
+      echo "/usr/bin/$pkgname"
+      echo "$version"
+    } > "$INSTALL_DIR/$pkgname.pkginfo"
 
     rm -rf "$tempdir"
 
@@ -140,8 +130,8 @@ install_pkg() {
 }
 
 remove_pkg() {
-    pkgname="$1"
-    pkginfo="$INSTALL_DIR/$pkgname.pkginfo"
+    local pkgname="$1"
+    local pkginfo="$INSTALL_DIR/$pkgname.pkginfo"
 
     if [ ! -f "$pkginfo" ]; then
         echo "Package not installed: $pkgname"
@@ -149,13 +139,9 @@ remove_pkg() {
     fi
 
     echo "Removing $pkgname..."
-
     while read -r file; do
-        # Skip empty lines and lines that look like version numbers
-        if [[ "$file" =~ ^/ ]]; then
-            sudo rm -f "$file"
-            echo "Deleted $file"
-        fi
+        # Delete files only if looks like paths
+        [[ "$file" == /* ]] && sudo rm -f "$file" && echo "Deleted $file"
     done < "$pkginfo"
 
     rm -f "$pkginfo"
@@ -164,24 +150,35 @@ remove_pkg() {
 
 list_pkgs() {
     echo "Installed packages:"
-    for f in "$INSTALL_DIR"/*.pkginfo; do
-        [ -e "$f" ] && basename "$f" .pkginfo
+    shopt -s nullglob
+    local pkgfiles=("$INSTALL_DIR"/*.pkginfo)
+    if [ ${#pkgfiles[@]} -eq 0 ]; then
+        echo "No packages installed."
+        return
+    fi
+    for f in "${pkgfiles[@]}"; do
+        basename "$f" .pkginfo
     done
 }
 
 search_pkgs() {
     echo "Available local packages:"
-    for f in "$REPO_DIR"/*.tar.gz; do
-        [ -e "$f" ] && basename "$f" .tar.gz
-    done
-
+    shopt -s nullglob
+    local pkgs=("$REPO_DIR"/*.tar.gz)
+    if [ ${#pkgs[@]} -eq 0 ]; then
+        echo "No local packages found."
+    else
+        for f in "${pkgs[@]}"; do
+            basename "$f" .tar.gz
+        done
+    fi
     echo ""
     echo "Configured remote repositories:"
     cat "$REPO_LIST"
 }
 
 add_repo() {
-    url="$1"
+    local url="$1"
     if grep -Fxq "$url" "$REPO_LIST" 2>/dev/null; then
         echo "Repository already exists."
     else
@@ -204,10 +201,12 @@ repo_add() {
         exit 1
     fi
 
+    local filename
     filename=$(basename -- "$scriptpath")
-    pkgname="${filename%.*}"
-    echo "Packaging $filename as $pkgname.tar.gz"
+    local pkgname="${filename%.*}"
 
+    echo "Packaging $filename as $pkgname.tar.gz"
+    local tempdir
     tempdir=$(mktemp -d)
     cp "$scriptpath" "$tempdir/$filename"
 
@@ -228,27 +227,34 @@ repo_add() {
 
 update_pkgs() {
     echo "Checking for package updates..."
-    for pkginfo in "$INSTALL_DIR"/*.pkginfo; do
+    shopt -s nullglob
+    local pkginfos=("$INSTALL_DIR"/*.pkginfo)
+    if [ ${#pkginfos[@]} -eq 0 ]; then
+        echo "No installed packages to update."
+        return
+    fi
+
+    for pkginfo in "${pkginfos[@]}"; do
+        local pkgname
         pkgname=$(basename "$pkginfo" .pkginfo)
+        local installed_version
         installed_version=$(sed -n '2p' "$pkginfo")
 
         echo "Checking updates for $pkgname..."
 
-        updated=0
+        local updated=0
         while read -r repo; do
+            local baseurl version_url new_version
             baseurl="${repo%/}"
             version_url="$baseurl/$pkgname.version"
             new_version=$(curl -fsSL "$version_url" 2>/dev/null)
 
-            if [ -n "$new_version" ]; then
-                if [[ "$new_version" != "$installed_version" ]]; then
-                    echo "Update found for $pkgname: $installed_version -> $new_version"
-                    # Call this script recursively to remove and install updated package
-                    "$0" remove "$pkgname"
-                    "$0" install "$pkgname"
-                    updated=1
-                    break
-                fi
+            if [ -n "$new_version" ] && [[ "$new_version" != "$installed_version" ]]; then
+                echo "Update found for $pkgname: $installed_version -> $new_version"
+                "$0" remove "$pkgname"
+                "$0" install "$pkgname"
+                updated=1
+                break
             fi
         done < "$REPO_LIST"
 
@@ -262,23 +268,18 @@ usage() {
     echo "Usage: $0 {install|remove|list|search|add-repo|list-repos|repo-add|update} [package|url]"
 }
 
+# Run first-time setup if config missing
 if [ ! -f "$CONFIG" ]; then
     first_run_setup
 fi
 
 case "$1" in
     install)
-        if [ -z "$2" ]; then
-            echo "Error: Please specify a package to install."
-            exit 1
-        fi
+        [ -z "$2" ] && { echo "Error: Please specify a package to install."; exit 1; }
         install_pkg "$2"
         ;;
     remove)
-        if [ -z "$2" ]; then
-            echo "Error: Please specify a package to remove."
-            exit 1
-        fi
+        [ -z "$2" ] && { echo "Error: Please specify a package to remove."; exit 1; }
         remove_pkg "$2"
         ;;
     list)
@@ -288,10 +289,7 @@ case "$1" in
         search_pkgs
         ;;
     add-repo)
-        if [ -z "$2" ]; then
-            echo "Error: Please specify a repository URL to add."
-            exit 1
-        fi
+        [ -z "$2" ] && { echo "Error: Please specify a repository URL to add."; exit 1; }
         add_repo "$2"
         ;;
     list-repos)

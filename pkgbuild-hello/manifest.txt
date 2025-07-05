@@ -1,0 +1,5 @@
+Name: hello
+Version: 1.0
+Depends:
+Files:
+  usr/bin/hello
