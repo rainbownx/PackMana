@@ -82,6 +82,10 @@ if [ ! -f "$CONFIG" ]; then
 fi
 
 # Your case/switch handling of commands follows...
+usage() {
+    echo "Usage: $0 {install|remove|list|search|add-repo|list-repos|repo-add|update} [package|url]"
+}
+
 case "$1" in
     install)
         if [ -z "$2" ]; then
