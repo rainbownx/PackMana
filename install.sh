@@ -1,41 +1,12 @@
 #!/bin/bash
+# Install script for Packmana
 
-set -e
+TARGET_DIR="/opt/packmana"
 
-REPO_URL="https://github.com/rainbownx/PackMana.git"
-INSTALL_DIR="/usr/local/share/packmana"
-BIN_LINK="/usr/bin/packmana"
+# Clone the repo
+sudo git clone https://github.com/rainbownx/PackMana.git "$TARGET_DIR"
 
-if [[ $EUID -ne 0 ]]; then
-   echo "Please run this script with sudo or as root."
-   exit 1
-fi
+# Link the main executable to /usr/bin
+sudo ln -sf "$TARGET_DIR/packmana" /usr/bin/packmana
 
-echo "Installing PackMana..."
-
-# Clone or update repo
-if [ -d "$INSTALL_DIR" ]; then
-    echo "PackMana directory already exists, pulling latest changes..."
-    git -C "$INSTALL_DIR" pull
-else
-    echo "Cloning PackMana repository into $INSTALL_DIR..."
-    git clone "$REPO_URL" "$INSTALL_DIR"
-fi
-
-# Create required directories if missing
-mkdir -p "$INSTALL_DIR/cache"
-mkdir -p "$INSTALL_DIR/installed"
-
-# Create empty repos.list if not exists
-touch "$INSTALL_DIR/repos.list"
-
-# Create symlink in /usr/bin
-if [ -L "$BIN_LINK" ] || [ -f "$BIN_LINK" ]; then
-    echo "Removing existing $BIN_LINK"
-    rm -f "$BIN_LINK"
-fi
-ln -s "$INSTALL_DIR/packmana" "$BIN_LINK"
-chmod +x "$INSTALL_DIR/packmana"
-
-echo "PackMana installed successfully!"
-echo "You can now run 'packmana' from the terminal."
+echo "Packmana installed. You can run it by typing 'packmana'."
