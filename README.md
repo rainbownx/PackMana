@@ -24,3 +24,4 @@ git clone https://github.com/rainbownx/Packmana.git
 cd Packmana
 chmod +x install.sh
 ./install.sh
+sudo chmod /usr/bin/packmana
