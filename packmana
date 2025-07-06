@@ -3,7 +3,7 @@
 REPO_DIR="./packages"
 CACHE_DIR="./cache"
 REPO_LIST="./repos.list"
-CONFIG="$HOME/.packmana_config"      # Changed from ./ to $HOME for reliability
+CONFIG="$HOME/.packmana_config"
 INSTALL_DIR="./installed"
 
 mkdir -p "$REPO_DIR" "$CACHE_DIR" "$INSTALL_DIR"
@@ -12,7 +12,6 @@ touch "$REPO_LIST"
 first_run_setup() {
     echo "Welcome to Packmana!"
     echo "It looks like this is your first time running Packmana."
-
     echo ""
     echo "Please select which package repositories you'd like to add:"
     echo "1) Packmana Official Repo"
@@ -38,21 +37,11 @@ first_run_setup() {
     IFS=',' read -ra sel <<< "$choices"
     for choice in "${sel[@]}"; do
         case "$choice" in
-            1)
-                add_repo_safe "https://rainbownx.github.io/PackMana-Respository"
-                ;;
-            2)
-                add_repo_safe "https://gitlab.archlinux.org/archlinux"
-                ;;
-            3)
-                add_repo_safe "https://aur.archlinux.org"
-                ;;
-            4)
-                echo "You chose to add your own repo URL."
-                ;;
-            *)
-                echo "Ignoring invalid choice: $choice"
-                ;;
+            1) add_repo_safe "https://rainbownx.github.io/PackMana-Respository" ;;
+            2) add_repo_safe "https://gitlab.archlinux.org/archlinux" ;;
+            3) add_repo_safe "https://aur.archlinux.org" ;;
+            4) echo "You chose to add your own repo URL." ;;
+            *) echo "Ignoring invalid choice: $choice" ;;
         esac
     done
 
@@ -60,71 +49,190 @@ first_run_setup() {
     if [[ "$addcustom" =~ ^[Yy]$ ]]; then
         while true; do
             read -rp "Enter the full URL of your custom repo (or leave empty to finish): " customurl
-            if [[ -z "$customurl" ]]; then
-                break
-            fi
+            [[ -z "$customurl" ]] && break
             add_repo_safe "$customurl"
         done
     fi
 
-    touch "$CONFIG"  # Create the config file here so first run won't repeat
+    touch "$CONFIG"
     echo "Setup complete! You can add more repos anytime with 'packmana add-repo <url>'."
     echo ""
 }
 
-# --- rest of your functions here ---
+install_pkg() {
+    pkgname="$1"
+    pkgname="${pkgname%.tar.gz}"
+    cachefile="$CACHE_DIR/$pkgname.tar.gz"
 
-# ...
+    localfile="$REPO_DIR/$pkgname.tar.gz"
+    if [ -f "$localfile" ]; then
+        echo "Installing $pkgname from local repository..."
+        cp "$localfile" "$cachefile"
+    else
+        echo "Searching remote repositories for $pkgname..."
+        found=0
+        while read -r url; do
+            baseurl="${url%/}"
+            pkgurl="$baseurl/$pkgname.tar.gz"
+            echo "Trying $pkgurl"
+            if curl --fail --location --progress-bar -o "$cachefile" "$pkgurl"; then
+                found=1
+                break
+            fi
+        done < "$REPO_LIST"
+        [ "$found" -ne 1 ] && echo "Package $pkgname not found in any repository." && exit 1
+    fi
 
-# Check first run by existence of config file in home directory
-if [ ! -f "$CONFIG" ]; then
-    first_run_setup
-fi
+    echo "Extracting package..."
+    tempdir=$(mktemp -d)
+    tar -xzf "$cachefile" -C "$tempdir" || { echo "Extraction failed."; rm -rf "$tempdir"; exit 1; }
 
-# Your case/switch handling of commands follows...
+    scriptfile=$(find "$tempdir" -type f -name "*.sh" | head -n1)
+    if [ -z "$scriptfile" ]; then
+        echo "Error: No .sh script file found inside the package."
+        rm -rf "$tempdir"
+        exit 1
+    fi
+
+    echo "Installing script $scriptfile to /usr/bin/$pkgname"
+    sudo mv "$scriptfile" "/usr/bin/$pkgname"
+    sudo chmod +x "/usr/bin/$pkgname"
+
+    version="unknown"
+    while read -r url; do
+        version_url="${url%/}/$pkgname.version"
+        remote_version=$(curl -fsSL "$version_url" 2>/dev/null)
+        if [ -n "$remote_version" ]; then
+            version="$remote_version"
+            break
+        fi
+    done < "$REPO_LIST"
+
+    echo "/usr/bin/$pkgname" > "$INSTALL_DIR/$pkgname.pkginfo"
+    echo "$version" >> "$INSTALL_DIR/$pkgname.pkginfo"
+
+    rm -rf "$tempdir"
+    echo "Installed $pkgname successfully (version: $version)."
+}
+
+remove_pkg() {
+    pkgname="$1"
+    pkginfo="$INSTALL_DIR/$pkgname.pkginfo"
+
+    [ ! -f "$pkginfo" ] && echo "Package not installed: $pkgname" && exit 1
+    echo "Removing $pkgname..."
+
+    while read -r file; do
+        [[ "$file" =~ ^/ ]] && sudo rm -f "$file" && echo "Deleted $file"
+    done < "$pkginfo"
+
+    rm -f "$pkginfo"
+    echo "Removed $pkgname."
+}
+
+list_pkgs() {
+    echo "Installed packages:"
+    for f in "$INSTALL_DIR"/*.pkginfo; do
+        [ -e "$f" ] && basename "$f" .pkginfo
+    done
+}
+
+search_pkgs() {
+    echo "Available local packages:"
+    for f in "$REPO_DIR"/*.tar.gz; do
+        [ -e "$f" ] && basename "$f" .tar.gz
+    done
+    echo ""
+    echo "Configured remote repositories:"
+    cat "$REPO_LIST"
+}
+
+add_repo() {
+    url="$1"
+    if grep -Fxq "$url" "$REPO_LIST"; then
+        echo "Repository already exists."
+    else
+        echo "$url" >> "$REPO_LIST"
+        echo "Repository added: $url"
+    fi
+}
+
+list_repos() {
+    echo "Configured repositories:"
+    cat "$REPO_LIST"
+}
+
+repo_add() {
+    echo "Enter path to your local bash script (.sh or plain bash file):"
+    read -r scriptpath
+    [ ! -f "$scriptpath" ] && echo "File does not exist." && exit 1
+
+    filename=$(basename -- "$scriptpath")
+    pkgname="${filename%.*}"
+    echo "Packaging $filename as $pkgname.tar.gz"
+
+    tempdir=$(mktemp -d)
+    cp "$scriptpath" "$tempdir/$filename"
+
+    tar -czf "$REPO_DIR/$pkgname.tar.gz" -C "$tempdir" "$filename"
+    rm -rf "$tempdir"
+
+    echo "Package created at $REPO_DIR/$pkgname.tar.gz"
+    echo ""
+    echo "To upload this to your repo:"
+    echo "  cp $REPO_DIR/$pkgname.tar.gz <your repo folder>"
+    echo "  git add $pkgname.tar.gz"
+    echo "  git commit -m 'Add $pkgname'"
+    echo "  git push"
+}
+
+update_pkgs() {
+    echo "Checking for package updates..."
+    for pkginfo in "$INSTALL_DIR"/*.pkginfo; do
+        pkgname=$(basename "$pkginfo" .pkginfo)
+        installed_version=$(sed -n '2p' "$pkginfo")
+
+        updated=0
+        while read -r repo; do
+            version_url="${repo%/}/$pkgname.version"
+            new_version=$(curl -fsSL "$version_url" 2>/dev/null)
+            if [ -n "$new_version" ] && [ "$new_version" != "$installed_version" ]; then
+                echo "Update available: $pkgname ($installed_version → $new_version)"
+                "$0" remove "$pkgname"
+                "$0" install "$pkgname"
+                updated=1
+                break
+            fi
+        done < "$REPO_LIST"
+        [ "$updated" -eq 0 ] && echo "$pkgname is up to date."
+    done
+}
+
 usage() {
     echo "Usage: $0 {install|remove|list|search|add-repo|list-repos|repo-add|update} [package|url]"
 }
 
+# === Main flow ===
+
+[ ! -f "$CONFIG" ] && first_run_setup
+
 case "$1" in
     install)
-        if [ -z "$2" ]; then
-            echo "Error: Please specify a package to install."
-            exit 1
-        fi
+        [ -z "$2" ] && echo "Error: Please specify a package to install." && exit 1
         install_pkg "$2"
         ;;
     remove)
-        if [ -z "$2" ]; then
-            echo "Error: Please specify a package to remove."
-            exit 1
-        fi
+        [ -z "$2" ] && echo "Error: Please specify a package to remove." && exit 1
         remove_pkg "$2"
         ;;
-    list)
-        list_pkgs
-        ;;
-    search)
-        search_pkgs
-        ;;
+    list) list_pkgs ;;
+    search) search_pkgs ;;
     add-repo)
-        if [ -z "$2" ]; then
-            echo "Error: Please specify a repository URL to add."
-            exit 1
-        fi
+        [ -z "$2" ] && echo "Error: Please specify a repository URL to add." && exit 1
         add_repo "$2"
         ;;
-    list-repos)
-        list_repos
-        ;;
-    repo-add)
-        repo_add
-        ;;
-    update)
-        update_pkgs
-        ;;
-    *)
-        usage
-        exit 1
-        ;;
+    list-repos) list_repos ;;
+    repo-add) repo_add ;;
+    update) update_pkgs ;;
+    *) usage; exit 1 ;;
 esac
