@@ -63,8 +63,8 @@ install_pkg() {
     pkgname="$1"
     pkgname="${pkgname%.tar.gz}"
     cachefile="$CACHE_DIR/$pkgname.tar.gz"
-
     localfile="$REPO_DIR/$pkgname.tar.gz"
+
     if [ -f "$localfile" ]; then
         echo "Installing $pkgname from local repository..."
         cp "$localfile" "$cachefile"
@@ -80,19 +80,15 @@ install_pkg() {
                 break
             fi
         done < "$REPO_LIST"
-        [ "$found" -ne 1 ] && echo "Package $pkgname not found in any repository." && exit 1
+        [ "$found" -ne 1 ] && echo "Package $pkgname not found." && exit 1
     fi
 
     echo "Extracting package..."
     tempdir=$(mktemp -d)
-    tar -xzf "$cachefile" -C "$tempdir" || { echo "Extraction failed."; rm -rf "$tempdir"; exit 1; }
-
+    tar -xzf "$cachefile" -C "$tempdir"
     scriptfile=$(find "$tempdir" -type f -name "*.sh" | head -n1)
-    if [ -z "$scriptfile" ]; then
-        echo "Error: No .sh script file found inside the package."
-        rm -rf "$tempdir"
-        exit 1
-    fi
+
+    [ -z "$scriptfile" ] && echo "Error: No .sh script found." && rm -rf "$tempdir" && exit 1
 
     echo "Installing script $scriptfile to /usr/bin/$pkgname"
     sudo mv "$scriptfile" "/usr/bin/$pkgname"
@@ -100,30 +96,27 @@ install_pkg() {
 
     version="unknown"
     while read -r url; do
-        version_url="${url%/}/$pkgname.version"
+        baseurl="${url%/}"
+        version_url="$baseurl/$pkgname.version"
         remote_version=$(curl -fsSL "$version_url" 2>/dev/null)
-        if [ -n "$remote_version" ]; then
-            version="$remote_version"
-            break
-        fi
+        [ -n "$remote_version" ] && version="$remote_version" && break
     done < "$REPO_LIST"
 
     echo "/usr/bin/$pkgname" > "$INSTALL_DIR/$pkgname.pkginfo"
     echo "$version" >> "$INSTALL_DIR/$pkgname.pkginfo"
-
     rm -rf "$tempdir"
-    echo "Installed $pkgname successfully (version: $version)."
+
+    echo "Installed $pkgname (version: $version)."
 }
 
 remove_pkg() {
     pkgname="$1"
     pkginfo="$INSTALL_DIR/$pkgname.pkginfo"
+    [ ! -f "$pkginfo" ] && echo "Not installed: $pkgname" && exit 1
 
-    [ ! -f "$pkginfo" ] && echo "Package not installed: $pkgname" && exit 1
     echo "Removing $pkgname..."
-
     while read -r file; do
-        [[ "$file" =~ ^/ ]] && sudo rm -f "$file" && echo "Deleted $file"
+        [[ "$file" == /* ]] && sudo rm -f "$file" && echo "Deleted $file"
     done < "$pkginfo"
 
     rm -f "$pkginfo"
@@ -142,6 +135,7 @@ search_pkgs() {
     for f in "$REPO_DIR"/*.tar.gz; do
         [ -e "$f" ] && basename "$f" .tar.gz
     done
+
     echo ""
     echo "Configured remote repositories:"
     cat "$REPO_LIST"
@@ -149,12 +143,25 @@ search_pkgs() {
 
 add_repo() {
     url="$1"
-    if grep -Fxq "$url" "$REPO_LIST"; then
-        echo "Repository already exists."
-    else
-        echo "$url" >> "$REPO_LIST"
-        echo "Repository added: $url"
-    fi
+    grep -Fxq "$url" "$REPO_LIST" && echo "Repo exists." || echo "$url" >> "$REPO_LIST" && echo "Added $url"
+}
+
+remove_repo() {
+    echo "Configured repositories:"
+    mapfile -t repos < "$REPO_LIST"
+    [ "${#repos[@]}" -eq 0 ] && echo "No repositories to remove." && return
+
+    for i in "${!repos[@]}"; do
+        printf "%d) %s\n" "$((i+1))" "${repos[$i]}"
+    done
+
+    read -rp "Enter the number to remove: " choice
+    [[ ! "$choice" =~ ^[0-9]+$ || "$choice" -lt 1 || "$choice" -gt "${#repos[@]}" ]] && echo "Invalid." && return
+
+    removed="${repos[$((choice-1))]}"
+    unset 'repos[$((choice-1))]'
+    printf "%s\n" "${repos[@]}" > "$REPO_LIST"
+    echo "Removed: $removed"
 }
 
 list_repos() {
@@ -163,9 +170,9 @@ list_repos() {
 }
 
 repo_add() {
-    echo "Enter path to your local bash script (.sh or plain bash file):"
+    echo "Enter path to your local .sh file:"
     read -r scriptpath
-    [ ! -f "$scriptpath" ] && echo "File does not exist." && exit 1
+    [ ! -f "$scriptpath" ] && echo "File not found." && exit 1
 
     filename=$(basename -- "$scriptpath")
     pkgname="${filename%.*}"
@@ -173,31 +180,26 @@ repo_add() {
 
     tempdir=$(mktemp -d)
     cp "$scriptpath" "$tempdir/$filename"
-
     tar -czf "$REPO_DIR/$pkgname.tar.gz" -C "$tempdir" "$filename"
     rm -rf "$tempdir"
 
-    echo "Package created at $REPO_DIR/$pkgname.tar.gz"
-    echo ""
-    echo "To upload this to your repo:"
-    echo "  cp $REPO_DIR/$pkgname.tar.gz <your repo folder>"
-    echo "  git add $pkgname.tar.gz"
-    echo "  git commit -m 'Add $pkgname'"
-    echo "  git push"
+    echo "Created: $REPO_DIR/$pkgname.tar.gz"
+    echo "Now git add/push to your repo to share it."
 }
 
 update_pkgs() {
-    echo "Checking for package updates..."
+    echo "Checking for updates..."
     for pkginfo in "$INSTALL_DIR"/*.pkginfo; do
         pkgname=$(basename "$pkginfo" .pkginfo)
         installed_version=$(sed -n '2p' "$pkginfo")
-
+        echo "Checking $pkgname..."
         updated=0
         while read -r repo; do
-            version_url="${repo%/}/$pkgname.version"
+            baseurl="${repo%/}"
+            version_url="$baseurl/$pkgname.version"
             new_version=$(curl -fsSL "$version_url" 2>/dev/null)
             if [ -n "$new_version" ] && [ "$new_version" != "$installed_version" ]; then
-                echo "Update available: $pkgname ($installed_version → $new_version)"
+                echo "Update for $pkgname: $installed_version -> $new_version"
                 "$0" remove "$pkgname"
                 "$0" install "$pkgname"
                 updated=1
@@ -209,28 +211,18 @@ update_pkgs() {
 }
 
 usage() {
-    echo "Usage: $0 {install|remove|list|search|add-repo|list-repos|repo-add|update} [package|url]"
+    echo "Usage: $0 {install|remove|list|search|add-repo|remove-repo|list-repos|repo-add|update} [package|url]"
 }
-
-# === Main flow ===
 
 [ ! -f "$CONFIG" ] && first_run_setup
 
 case "$1" in
-    install)
-        [ -z "$2" ] && echo "Error: Please specify a package to install." && exit 1
-        install_pkg "$2"
-        ;;
-    remove)
-        [ -z "$2" ] && echo "Error: Please specify a package to remove." && exit 1
-        remove_pkg "$2"
-        ;;
+    install) [ -z "$2" ] && echo "Error: Please specify a package to install." && exit 1; install_pkg "$2" ;;
+    remove) [ -z "$2" ] && echo "Error: Please specify a package to remove." && exit 1; remove_pkg "$2" ;;
     list) list_pkgs ;;
     search) search_pkgs ;;
-    add-repo)
-        [ -z "$2" ] && echo "Error: Please specify a repository URL to add." && exit 1
-        add_repo "$2"
-        ;;
+    add-repo) [ -z "$2" ] && echo "Error: Please specify a repository URL." && exit 1; add_repo "$2" ;;
+    remove-repo) remove_repo ;;
     list-repos) list_repos ;;
     repo-add) repo_add ;;
     update) update_pkgs ;;
